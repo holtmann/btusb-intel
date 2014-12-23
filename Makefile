@@ -14,3 +14,7 @@ clean:
 	rm -f *.o .*.cmd *.ko *.mod.c
 	rm -f Module.symvers modules.order
 	rm -rf .tmp_versions
+
+reload:
+	sudo rmmod btusb
+	sudo insmod ./btusb.ko

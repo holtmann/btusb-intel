@@ -308,6 +308,7 @@ struct btusb_data {
 	int isoc_altsetting;
 	int suspend_count;
 
+	int (*recv_event)(struct hci_dev *hdev, struct sk_buff *skb);
 	int (*recv_bulk)(struct btusb_data *data, void *buffer, int count);
 };
 
@@ -373,7 +374,7 @@ static int btusb_recv_intr(struct btusb_data *data, void *buffer, int count)
 
 		if (bt_cb(skb)->expect == 0) {
 			/* Complete frame */
-			hci_recv_frame(data->hdev, skb);
+			data->recv_event(data->hdev, skb);
 			skb = NULL;
 		}
 	}
@@ -1735,6 +1736,11 @@ static int btusb_recv_bulk_intel(struct btusb_data *data, void *buffer,
 	return btusb_recv_bulk(data, buffer, count);
 }
 
+static int btusb_recv_event_intel(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	return hci_recv_frame(hdev, skb);
+}
+
 static int btusb_send_frame_intel(struct hci_dev *hdev, struct sk_buff *skb)
 {
 	struct btusb_data *data = hci_get_drvdata(hdev);
@@ -2289,9 +2295,11 @@ static int btusb_probe(struct usb_interface *intf,
 	spin_lock_init(&data->rxlock);
 
 	if (id->driver_info & BTUSB_INTEL_NEW) {
+		data->recv_event = btusb_recv_event_intel;
 		data->recv_bulk = btusb_recv_bulk_intel;
 		set_bit(BTUSB_BOOTLOADER, &data->flags);
 	} else {
+		data->recv_event = hci_recv_frame;
 		data->recv_bulk = btusb_recv_bulk;
 	}
 

@@ -1947,6 +1947,7 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	if (ver->fw_variant == 0x23) {
 		BT_INFO("%s: Intel firmware already loaded", hdev->name);
 		kfree_skb(skb);
+		clear_bit(BTUSB_BOOTLOADER, &data->flags);
 		btusb_check_bdaddr_intel(hdev);
 		return 0;
 	}

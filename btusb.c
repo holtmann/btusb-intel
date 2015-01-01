@@ -1992,9 +1992,37 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 			kfree_skb(skb);
 			return err;
 		}
+
+		BT_INFO("%s: Found generic firmware: %s", hdev->name, fwname);
+
+		/* Use a matching file for the DDC configuration parameters
+		 * that will be loaded later in the process.
+		 */
+		snprintf(fwname, sizeof(fwname), "intel/ibt-%u.ddc",
+			 ver->hw_variant);
+	} else {
+		BT_INFO("%s: Found firmware: %s", hdev->name, fwname);
+
+		/* If the firmware is identified by hardare variant and
+		 * hardware revision, then pick the same DDC configuration
+		 * parameters file.
+		 *
+		 * It makes no sense to even try looking for a generic
+		 * one in this case. The firmware and DDC configuration
+		 * parameters should be supplied together.
+		 */
+		snprintf(fwname, sizeof(fwname), "intel/ibt-%u-%u.ddc",
+			 ver->hw_variant, ver->hw_revision);
 	}
 
 	kfree_skb(skb);
+
+	if (fw->size < 644) {
+		BT_ERR("%s: Invalid size of firmware file (%zu)",
+		       hdev->name, fw->size);
+		err = -EBADF;
+		goto done;
+	}
 
 	/* Read the secure boot parameters to identify the operating
 	 * details of the bootloader.
@@ -2045,15 +2073,6 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		set_bit(HCI_QUIRK_INVALID_BDADDR, &hdev->quirks);
 
 	kfree_skb(skb);
-
-	BT_INFO("%s: Using Intel Bluetooth firmware: %s", hdev->name, fwname);
-
-	if (fw->size < 644) {
-		BT_ERR("%s: Invalid size of firmware file (%zu)",
-		       hdev->name, fw->size);
-		err = -EBADF;
-		goto done;
-	}
 
 	set_bit(BTUSB_DOWNLOADING, &data->flags);
 

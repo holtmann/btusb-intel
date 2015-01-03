@@ -50,7 +50,7 @@ static struct usb_driver btusb_driver;
 #define BTUSB_INTEL_BOOT	0x200
 #define BTUSB_BCM_PATCHRAM	0x400
 #define BTUSB_MARVELL		0x800
-#define BTUSB_AVM		0x1000
+#define BTUSB_SWAVE		0x1000
 #define BTUSB_INTEL_NEW		0x2000
 
 static const struct usb_device_id btusb_table[] = {
@@ -88,7 +88,7 @@ static const struct usb_device_id btusb_table[] = {
 	{ USB_DEVICE(0x05ac, 0x8281) },
 
 	/* AVM BlueFRITZ! USB v2.0 */
-	{ USB_DEVICE(0x057c, 0x3800), .driver_info = BTUSB_AVM },
+	{ USB_DEVICE(0x057c, 0x3800), .driver_info = BTUSB_SWAVE },
 
 	/* Bluetooth Ultraport Module from IBM */
 	{ USB_DEVICE(0x04bf, 0x030a) },
@@ -239,6 +239,9 @@ static const struct usb_device_id blacklist_table[] = {
 
 	/* CONWISE Technology based adapters with buggy SCO support */
 	{ USB_DEVICE(0x0e5e, 0x6622), .driver_info = BTUSB_BROKEN_ISOC },
+
+	/* Roper Class 1 Bluetooth Dongle (Silicon Wave based) */
+	{ USB_DEVICE(0x1300, 0x0001), .driver_info = BTUSB_SWAVE },
 
 	/* Digianswer devices */
 	{ USB_DEVICE(0x08fd, 0x0001), .driver_info = BTUSB_DIGIANSWER },
@@ -2599,10 +2602,12 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info & BTUSB_MARVELL)
 		hdev->set_bdaddr = btusb_set_bdaddr_marvell;
 
+	if (id->driver_info & BTUSB_SWAVE) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
-	if (id->driver_info & BTUSB_AVM)
+		set_bit(HCI_QUIRK_FIXUP_INQUIRY_MODE, &hdev->quirks);
 		set_bit(HCI_QUIRK_BROKEN_LOCAL_COMMANDS, &hdev->quirks);
 #endif
+	}
 
 	if (id->driver_info & BTUSB_INTEL_BOOT)
 		set_bit(HCI_QUIRK_RAW_DEVICE, &hdev->quirks);

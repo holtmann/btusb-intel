@@ -6,7 +6,9 @@ PWD := $(shell pwd)
 
 ccflags-y := -D__CHECK_ENDIAN__
 
-all:
+all: btusb.ko
+
+btusb.ko: btusb.c
 	$(MAKE) -C $(KERNELDIR) M=$(PWD)
 
 clean:
@@ -16,5 +18,5 @@ clean:
 	rm -rf .tmp_versions
 
 reload:
-	sudo rmmod btusb
+	-sudo rmmod btusb
 	sudo insmod ./btusb.ko

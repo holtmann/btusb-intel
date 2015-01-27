@@ -281,7 +281,8 @@ static const struct usb_device_id blacklist_table[] = {
 #define BTUSB_DID_ISO_RESUME	4
 #define BTUSB_BOOTLOADER	5
 #define BTUSB_DOWNLOADING	6
-#define BTUSB_FIRMWARE_FAILED	7
+#define BTUSB_BOOTING		7
+#define BTUSB_FIRMWARE_FAILED	8
 
 struct btusb_data {
 	struct hci_dev       *hdev;
@@ -1791,6 +1792,16 @@ static int btusb_recv_event_intel(struct hci_dev *hdev, struct sk_buff *skb)
 			if (test_and_clear_bit(BTUSB_DOWNLOADING, &data->flags))
 				wake_up_interruptible(&hdev->req_wait_q);
 		}
+
+		/* When switching to the operational firmware the device
+		 * sends a vendor specific event indicating that the bootup
+		 * completed.
+		 */
+		if (skb->len == 9 && hdr->evt == 0xff && hdr->plen == 0x07 &&
+		    skb->data[2] == 0x02) {
+			if (test_and_clear_bit(BTUSB_BOOTING, &data->flags))
+				wake_up_interruptible(&hdev->req_wait_q);
+		}
 	}
 
 	return hci_recv_frame(hdev, skb);
@@ -1821,7 +1832,7 @@ static int btusb_send_frame_intel(struct hci_dev *hdev, struct sk_buff *skb)
 			else
 				urb = alloc_ctrl_urb(hdev, skb);
 
-			/* When the 0xfc01 command is issued to reboot into
+			/* When the 0xfc01 command is issued to boot into
 			 * the operational firmware, it will actually not
 			 * send a command complete event. To keep the flow
 			 * control working inject that event here.
@@ -1884,6 +1895,27 @@ static int btusb_intel_secure_send(struct hci_dev *hdev, u8 fragment_type,
 	return 0;
 }
 
+static void btusb_intel_version_info(struct hci_dev *hdev,
+				     struct intel_version *ver)
+{
+	const char *variant;
+
+	switch (ver->fw_variant) {
+	case 0x06:
+		variant = "Bootloader";
+		break;
+	case 0x23:
+		variant = "Firmware";
+		break;
+	default:
+		return;
+	}
+
+	BT_INFO("%s: %s revision %u.%u build %u week %u %u", hdev->name,
+		variant, ver->fw_revision >> 4, ver->fw_revision & 0x0f,
+		ver->fw_build_num, ver->fw_build_ww, 2000 + ver->fw_build_yy);
+}
+
 static int btusb_setup_intel_new(struct hci_dev *hdev)
 {
 	static const u8 reset_param[] = { 0x00, 0x01, 0x00, 0x01,
@@ -1939,6 +1971,8 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		return -EINVAL;
 	}
 
+	btusb_intel_version_info(hdev, ver);
+
 	/* The firmware variant determines if the device is in bootloader
 	 * mode or is running operational firmware. The value 0x06 identifies
 	 * the bootloader and the value 0x23 identifies the operational
@@ -1953,7 +1987,6 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	 * case since that command is only available in bootloader mode.
 	 */
 	if (ver->fw_variant == 0x23) {
-		BT_INFO("%s: Intel firmware already loaded", hdev->name);
 		kfree_skb(skb);
 		clear_bit(BTUSB_BOOTLOADER, &data->flags);
 		btusb_check_bdaddr_intel(hdev);
@@ -2011,7 +2044,7 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	} else {
 		BT_INFO("%s: Found firmware: %s", hdev->name, fwname);
 
-		/* If the firmware is identified by hardare variant and
+		/* If the firmware is identified by hardware variant and
 		 * hardware revision, then pick the same DDC configuration
 		 * parameters file.
 		 *
@@ -2059,6 +2092,16 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		goto done;
 	}
 
+	BT_INFO("%s: Device revision is %u", hdev->name,
+		le16_to_cpu(params->dev_revid));
+
+	BT_INFO("%s: Secure boot is %s", hdev->name,
+		params->secure_boot ? "enabled" : "disabled");
+
+	BT_INFO("%s: Minimum firmware build %u week %u %u", hdev->name,
+		params->min_fw_build_nn, params->min_fw_build_cw,
+		2000 + params->min_fw_build_yy);
+
 	/* It is required that every single firmware fragment is acknowledged
 	 * with a command complete event. If the boot parameters indicate
 	 * that this bootloader does not send them, then abort the setup.
@@ -2071,14 +2114,13 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		goto done;
 	}
 
-	BT_INFO("%s: Secure boot is %s", hdev->name,
-		params->secure_boot ? "enabled" : "disabled");
-
 	/* If the OTP has no valid Bluetooth device address, then there will
 	 * also be no valid address for the operational firmware.
 	 */
-	if (!bacmp(&params->otp_bdaddr, BDADDR_ANY))
+	if (!bacmp(&params->otp_bdaddr, BDADDR_ANY)) {
+		BT_INFO("%s: No device address configured", hdev->name);
 		set_bit(HCI_QUIRK_INVALID_BDADDR, &hdev->quirks);
+	}
 
 	kfree_skb(skb);
 
@@ -2140,7 +2182,7 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	 * that all fragments have been successfully received.
 	 *
 	 * When the event processing receives the notification, then this
-	 * flag will be cleared. So just in case that happens really quickly
+	 * flag will be cleared. So just in case that happens really quickly,
 	 * check it first before adding the wait queue.
 	 */
 	if (test_bit(BTUSB_DOWNLOADING, &data->flags)) {
@@ -2184,13 +2226,17 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	delta = ktime_sub(rettime, calltime);
 	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
 
-	BT_INFO("%s: Firmware loaded in %lld usecs", hdev->name, duration);
+	BT_INFO("%s: Firmware loaded in %llu usecs", hdev->name, duration);
 
 done:
 	release_firmware(fw);
 
 	if (err < 0)
 		return err;
+
+	calltime = ktime_get();
+
+	set_bit(BTUSB_BOOTING, &data->flags);
 
 	skb = __hci_cmd_sync(hdev, 0xfc01, sizeof(reset_param), reset_param,
 			     HCI_INIT_TIMEOUT);
@@ -2199,11 +2245,42 @@ done:
 
 	kfree_skb(skb);
 
-	/* The bootloader and the operational firmware do not indicate when
-	 * the device is ready. So wait for 200 msecs before allowing the
-	 * initialization procedure to continue.
+	/* The bootloader will not indicate when the device is ready. This
+	 * is done by the operational firmware sending bootup notification.
 	 */
-	msleep(200);
+	if (test_bit(BTUSB_BOOTING, &data->flags)) {
+		DECLARE_WAITQUEUE(wait, current);
+		signed long timeout;
+
+		BT_INFO("%s: Waiting for device to boot", hdev->name);
+
+		add_wait_queue(&hdev->req_wait_q, &wait);
+		set_current_state(TASK_INTERRUPTIBLE);
+
+		/* Booting into operational firmware should not take
+		 * longer than 1 second. However if that happens, then
+		 * just fail the setup since something went wrong.
+		 */
+		timeout = schedule_timeout(msecs_to_jiffies(1000));
+
+		remove_wait_queue(&hdev->req_wait_q, &wait);
+
+		if (signal_pending(current)) {
+			BT_ERR("%s: Device boot interrupted", hdev->name);
+			return -EINTR;
+		}
+
+		if (!timeout) {
+			BT_ERR("%s: Device boot timeout", hdev->name);
+			return -ETIMEDOUT;
+		}
+	}
+
+	rettime = ktime_get();
+	delta = ktime_sub(rettime, calltime);
+	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
+
+	BT_INFO("%s: Device booted in %llu usecs", hdev->name, duration);
 
 	clear_bit(BTUSB_BOOTLOADER, &data->flags);
 

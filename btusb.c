@@ -29,7 +29,7 @@
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
-#define VERSION "0.6-intel"
+#define VERSION "0.7-intel"
 
 static bool disable_scofix;
 static bool force_scofix;
@@ -281,8 +281,9 @@ static const struct usb_device_id blacklist_table[] = {
 #define BTUSB_DID_ISO_RESUME	4
 #define BTUSB_BOOTLOADER	5
 #define BTUSB_DOWNLOADING	6
-#define BTUSB_BOOTING		7
+#define BTUSB_FIRMWARE_LOADED	7
 #define BTUSB_FIRMWARE_FAILED	8
+#define BTUSB_BOOTING		9
 
 struct btusb_data {
 	struct hci_dev       *hdev;
@@ -1789,7 +1790,9 @@ static int btusb_recv_event_intel(struct hci_dev *hdev, struct sk_buff *skb)
 			if (skb->data[3] != 0x00)
 				test_bit(BTUSB_FIRMWARE_FAILED, &data->flags);
 
-			if (test_and_clear_bit(BTUSB_DOWNLOADING, &data->flags))
+			if (test_and_clear_bit(BTUSB_DOWNLOADING,
+					       &data->flags) &&
+			    test_bit(BTUSB_FIRMWARE_LOADED, &data->flags))
 				wake_up_interruptible(&hdev->req_wait_q);
 		}
 
@@ -2152,6 +2155,8 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		fw_ptr += cmd_len;
 	}
 
+	set_bit(BTUSB_FIRMWARE_LOADED, &data->flags);
+
 	/* Before switching the device into operational mode and with that
 	 * booting the loaded firmware, wait for the bootloader notification
 	 * that all fragments have been successfully received.
@@ -2261,6 +2266,48 @@ done:
 
 	return 0;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
+static void btusb_hw_error_intel(struct hci_dev *hdev, u8 code)
+{
+	struct sk_buff *skb;
+	u8 type = 0x00;
+
+	BT_ERR("%s: Hardware error 0x%2.2x", hdev->name, code);
+
+	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		BT_ERR("%s: Reset after hardware error failed (%ld)",
+		       hdev->name, PTR_ERR(skb));
+		return;
+	}
+	kfree_skb(skb);
+
+	skb = __hci_cmd_sync(hdev, 0xfc22, 1, &type, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		BT_ERR("%s: Retrieving Intel exception info failed (%ld)",
+		       hdev->name, PTR_ERR(skb));
+		return;
+	}
+
+	if (skb->len != 13) {
+		BT_ERR("%s: Exception info size mismatch", hdev->name);
+		kfree_skb(skb);
+		return;
+	}
+
+	if (skb->data[0] != 0x00) {
+		BT_ERR("%s: Exception info command failure (%02x)",
+		       hdev->name, skb->data[0]);
+		kfree_skb(skb);
+		return;
+	}
+
+	BT_ERR("%s: Exception info %s", hdev->name, (char *)(skb->data + 1));
+
+	kfree_skb(skb);
+}
+#endif
 
 static int btusb_set_bdaddr_intel(struct hci_dev *hdev, const bdaddr_t *bdaddr)
 {
@@ -2647,12 +2694,18 @@ static int btusb_probe(struct usb_interface *intf,
 
 	if (id->driver_info & BTUSB_INTEL) {
 		hdev->setup = btusb_setup_intel;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
+		hdev->hw_error = btusb_hw_error_intel;
+#endif
 		hdev->set_bdaddr = btusb_set_bdaddr_intel;
 	}
 
 	if (id->driver_info & BTUSB_INTEL_NEW) {
 		hdev->send = btusb_send_frame_intel;
 		hdev->setup = btusb_setup_intel_new;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
+		hdev->hw_error = btusb_hw_error_intel;
+#endif
 		hdev->set_bdaddr = btusb_set_bdaddr_intel;
 	}
 
@@ -2767,7 +2820,6 @@ static void btusb_disconnect(struct usb_interface *intf)
 	else if (data->isoc)
 		usb_driver_release_interface(&btusb_driver, data->isoc);
 
-	btusb_free_frags(data);
 	hci_free_dev(hdev);
 }
 

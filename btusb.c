@@ -123,6 +123,10 @@ static const struct usb_device_id btusb_table[] = {
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x0489, 0xff, 0x01, 0x01),
 	  .driver_info = BTUSB_BCM_PATCHRAM },
 
+	/* Lite-On Technology - Broadcom based */
+	{ USB_VENDOR_AND_INTERFACE_INFO(0x04ca, 0xff, 0x01, 0x01),
+	  .driver_info = BTUSB_BCM_PATCHRAM },
+
 	/* Broadcom devices with vendor specific id */
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x0a5c, 0xff, 0x01, 0x01),
 	  .driver_info = BTUSB_BCM_PATCHRAM },
@@ -334,6 +338,16 @@ struct btusb_data {
 	int (*recv_event)(struct hci_dev *hdev, struct sk_buff *skb);
 	int (*recv_bulk)(struct btusb_data *data, void *buffer, int count);
 };
+
+static int btusb_wait_on_bit_timeout(void *word, int bit, unsigned long timeout,
+				     unsigned mode)
+{
+	might_sleep();
+	if (!test_bit(bit, word))
+		return 0;
+	return out_of_line_wait_on_bit_timeout(word, bit, bit_wait_timeout,
+					       mode, timeout);
+}
 
 static inline void btusb_free_frags(struct btusb_data *data)
 {
@@ -1801,8 +1815,10 @@ static int btusb_recv_event_intel(struct hci_dev *hdev, struct sk_buff *skb)
 
 			if (test_and_clear_bit(BTUSB_DOWNLOADING,
 					       &data->flags) &&
-			    test_bit(BTUSB_FIRMWARE_LOADED, &data->flags))
-				wake_up_interruptible(&hdev->req_wait_q);
+			    test_bit(BTUSB_FIRMWARE_LOADED, &data->flags)) {
+				smp_mb__after_atomic();
+				wake_up_bit(&data->flags, BTUSB_DOWNLOADING);
+			}
 		}
 
 		/* When switching to the operational firmware the device
@@ -1811,8 +1827,10 @@ static int btusb_recv_event_intel(struct hci_dev *hdev, struct sk_buff *skb)
 		 */
 		if (skb->len == 9 && hdr->evt == 0xff && hdr->plen == 0x07 &&
 		    skb->data[2] == 0x02) {
-			if (test_and_clear_bit(BTUSB_BOOTING, &data->flags))
-				wake_up_interruptible(&hdev->req_wait_q);
+			if (test_and_clear_bit(BTUSB_BOOTING, &data->flags)) {
+				smp_mb__after_atomic();
+				wake_up_bit(&data->flags, BTUSB_BOOTING);
+			}
 		}
 	}
 
@@ -2166,43 +2184,32 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 
 	set_bit(BTUSB_FIRMWARE_LOADED, &data->flags);
 
+	BT_INFO("%s: Waiting for firmware download to complete", hdev->name);
+
 	/* Before switching the device into operational mode and with that
 	 * booting the loaded firmware, wait for the bootloader notification
 	 * that all fragments have been successfully received.
 	 *
-	 * When the event processing receives the notification, then this
-	 * flag will be cleared. So just in case that happens really quickly,
-	 * check it first before adding the wait queue.
+	 * When the event processing receives the notification, then the
+	 * BTUSB_DOWNLOADING flag will be cleared.
+	 *
+	 * The firmware loading should not take longer than 5 seconds
+	 * and thus just timeout if that happens and fail the setup
+	 * of this device.
 	 */
-	if (test_bit(BTUSB_DOWNLOADING, &data->flags)) {
-		DECLARE_WAITQUEUE(wait, current);
-		signed long timeout;
+	err = btusb_wait_on_bit_timeout(&data->flags, BTUSB_DOWNLOADING,
+					msecs_to_jiffies(5000),
+					TASK_INTERRUPTIBLE);
+	if (err == 1) {
+		BT_ERR("%s: Firmware loading interrupted", hdev->name);
+		err = -EINTR;
+		goto done;
+	}
 
-		BT_INFO("%s: Waiting for firmware download to complete",
-			hdev->name);
-
-		add_wait_queue(&hdev->req_wait_q, &wait);
-		set_current_state(TASK_INTERRUPTIBLE);
-
-		/* The firmware loading should not take longer than 5 seconds
-		 * and thus just timeout if that happens and fail the setup
-		 * of this device.
-		 */
-		timeout = schedule_timeout(msecs_to_jiffies(5000));
-
-		remove_wait_queue(&hdev->req_wait_q, &wait);
-
-		if (signal_pending(current)) {
-			BT_ERR("%s: Firmware loading interrupted", hdev->name);
-			err = -EINTR;
-			goto done;
-		}
-
-		if (!timeout) {
-			BT_ERR("%s: Firmware loading timeout", hdev->name);
-			err = -ETIMEDOUT;
-			goto done;
-		}
+	if (err) {
+		BT_ERR("%s: Firmware loading timeout", hdev->name);
+		err = -ETIMEDOUT;
+		goto done;
 	}
 
 	if (test_bit(BTUSB_FIRMWARE_FAILED, &data->flags)) {
@@ -2236,33 +2243,25 @@ done:
 
 	/* The bootloader will not indicate when the device is ready. This
 	 * is done by the operational firmware sending bootup notification.
+	 *
+	 * Booting into operational firmware should not take longer than
+	 * 1 second. However if that happens, then just fail the setup
+	 * since something went wrong.
 	 */
-	if (test_bit(BTUSB_BOOTING, &data->flags)) {
-		DECLARE_WAITQUEUE(wait, current);
-		signed long timeout;
+	BT_INFO("%s: Waiting for device to boot", hdev->name);
 
-		BT_INFO("%s: Waiting for device to boot", hdev->name);
+	err = btusb_wait_on_bit_timeout(&data->flags, BTUSB_BOOTING,
+					msecs_to_jiffies(1000),
+					TASK_INTERRUPTIBLE);
 
-		add_wait_queue(&hdev->req_wait_q, &wait);
-		set_current_state(TASK_INTERRUPTIBLE);
+	if (err == 1) {
+		BT_ERR("%s: Device boot interrupted", hdev->name);
+		return -EINTR;
+	}
 
-		/* Booting into operational firmware should not take
-		 * longer than 1 second. However if that happens, then
-		 * just fail the setup since something went wrong.
-		 */
-		timeout = schedule_timeout(msecs_to_jiffies(1000));
-
-		remove_wait_queue(&hdev->req_wait_q, &wait);
-
-		if (signal_pending(current)) {
-			BT_ERR("%s: Device boot interrupted", hdev->name);
-			return -EINTR;
-		}
-
-		if (!timeout) {
-			BT_ERR("%s: Device boot timeout", hdev->name);
-			return -ETIMEDOUT;
-		}
+	if (err) {
+		BT_ERR("%s: Device boot timeout", hdev->name);
+		return -ETIMEDOUT;
 	}
 
 	rettime = ktime_get();
@@ -2714,10 +2713,10 @@ static int btusb_probe(struct usb_interface *intf,
 
 	if (id->driver_info & BTUSB_INTEL) {
 		hdev->setup = btusb_setup_intel;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
-		hdev->hw_error = btusb_hw_error_intel;
-#endif
 		hdev->set_bdaddr = btusb_set_bdaddr_intel;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
+		set_bit(HCI_QUIRK_STRICT_DUPLICATE_FILTER, &hdev->quirks);
+#endif
 	}
 
 	if (id->driver_info & BTUSB_INTEL_NEW) {
@@ -2727,6 +2726,9 @@ static int btusb_probe(struct usb_interface *intf,
 		hdev->hw_error = btusb_hw_error_intel;
 #endif
 		hdev->set_bdaddr = btusb_set_bdaddr_intel;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
+		set_bit(HCI_QUIRK_STRICT_DUPLICATE_FILTER, &hdev->quirks);
+#endif
 	}
 
 	if (id->driver_info & BTUSB_MARVELL)
@@ -2742,8 +2744,12 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info & BTUSB_INTEL_BOOT)
 		set_bit(HCI_QUIRK_RAW_DEVICE, &hdev->quirks);
 
-	if (id->driver_info & BTUSB_ATH3012)
+	if (id->driver_info & BTUSB_ATH3012) {
 		hdev->set_bdaddr = btusb_set_bdaddr_ath3012;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
+		set_bit(HCI_QUIRK_STRICT_DUPLICATE_FILTER, &hdev->quirks);
+#endif
+	}
 
 	if (id->driver_info & BTUSB_AMP) {
 		/* AMP controllers do not support SCO packets */

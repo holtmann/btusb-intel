@@ -3040,6 +3040,9 @@ static int btusb_probe(struct usb_interface *intf,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 		set_bit(HCI_QUIRK_STRICT_DUPLICATE_FILTER, &hdev->quirks);
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+		set_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
+#endif
 	}
 
 	if (id->driver_info & BTUSB_INTEL_NEW) {
@@ -3069,6 +3072,9 @@ static int btusb_probe(struct usb_interface *intf,
 
 	if (id->driver_info & BTUSB_ATH3012) {
 		hdev->set_bdaddr = btusb_set_bdaddr_ath3012;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+		set_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 		set_bit(HCI_QUIRK_STRICT_DUPLICATE_FILTER, &hdev->quirks);
 #endif
@@ -3114,6 +3120,10 @@ static int btusb_probe(struct usb_interface *intf,
 		/* Fake CSR devices with broken commands */
 		if (bcdDevice <= 0x100)
 			hdev->setup = btusb_setup_csr;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+		set_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
+#endif
 	}
 
 	if (id->driver_info & BTUSB_SNIFFER) {

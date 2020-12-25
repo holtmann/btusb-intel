@@ -4,7 +4,8 @@ obj-m += btusb.o
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
-ccflags-y := -D__CHECK_ENDIAN__
+ccflags-y := -D__CHECK_ENDIAN__ \
+		-DCONFIG_BT_INTEL=n -DCONFIG_BT_BCM=n -DCONFIG_BT_RTL=n
 
 all: btusb.ko
 

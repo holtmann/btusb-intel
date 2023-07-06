@@ -25,7 +25,7 @@
 #include "btbcm.h"
 #include "btrtl.h"
 
-#define VERSION "0.8"
+#define VERSION "0.8-intel"
 
 static bool disable_scofix;
 static bool force_scofix;
@@ -61,6 +61,7 @@ static struct usb_driver btusb_driver;
 #define BTUSB_VALID_LE_STATES   0x800000
 #define BTUSB_QCA_WCN6855	0x1000000
 #define BTUSB_INTEL_NEWGEN	0x2000000
+#define BTUSB_ZEPHYR		0x4000000
 
 static const struct usb_device_id btusb_table[] = {
 	/* Generic Bluetooth USB device */
@@ -382,6 +383,9 @@ static const struct usb_device_id blacklist_table[] = {
 	/* Other Intel Bluetooth devices */
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x8087, 0xe0, 0x01, 0x01),
 	  .driver_info = BTUSB_IGNORE },
+
+	/* Zephyr Project Bluetooth USB devices */
+	{ USB_DEVICE(0x2fe3, 0x000b), .driver_info = BTUSB_ZEPHYR },
 
 	/* Realtek 8822CE Bluetooth devices */
 	{ USB_DEVICE(0x0bda, 0xb00c), .driver_info = BTUSB_REALTEK |
@@ -3122,6 +3126,66 @@ static int btusb_shutdown_intel_new(struct hci_dev *hdev)
 	return 0;
 }
 
+static int btusb_setup_zephyr(struct hci_dev *hdev)
+{
+	struct btusb_data *data = hci_get_drvdata(hdev);
+	struct sk_buff *skb;
+
+	bt_dev_dbg(hdev, "data %p", data);
+
+	/* Read Version Information */
+	skb = __hci_cmd_sync(hdev, 0xfc01, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+
+	/* Read Supported Commands */
+	skb = __hci_cmd_sync(hdev, 0xfc02, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+
+	/* Read Supported Features */
+	skb = __hci_cmd_sync(hdev, 0xfc03, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+
+	/* Read Build Information */
+	skb = __hci_cmd_sync(hdev, 0xfc08, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	bt_dev_info(hdev, "%s", (char *)(skb->data + 1));
+
+	hci_set_fw_info(hdev, "%s", skb->data + 1);
+	kfree_skb(skb);
+
+	/* Read Supported USB Transport Modes */
+	skb = __hci_cmd_sync(hdev, 0xfc10, 0, NULL, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+
+#if 0
+	{
+	u8 mode = 0x01;
+	/* Set USB Transport Mode */
+	skb = __hci_cmd_sync(hdev, 0xfc11, 1, &mode, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	kfree_skb(skb);
+	}
+#endif
+
+	return 0;
+}
+
 #define FIRMWARE_MT7663		"mediatek/mt7663pr2h.bin"
 #define FIRMWARE_MT7668		"mediatek/mt7668pr2h.bin"
 
@@ -4496,6 +4560,11 @@ static int btusb_probe(struct usb_interface *intf,
 		data->recv_event = btusb_recv_event_intel;
 		data->recv_bulk = btusb_recv_bulk_intel;
 		set_bit(BTUSB_BOOTLOADER, &data->flags);
+	}
+
+	if (id->driver_info & BTUSB_ZEPHYR) {
+		hdev->manufacturer = 1521;
+		hdev->setup = btusb_setup_zephyr;
 	}
 
 	if (id->driver_info & BTUSB_MARVELL)
